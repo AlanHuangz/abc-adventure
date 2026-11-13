@@ -337,12 +337,12 @@ let VOICE=null;
 function pickVoice(){
   if(!window.speechSynthesis) return null;
   const vs=speechSynthesis.getVoices().filter(v=>/^en[-_]/i.test(v.lang)||/^en$/i.test(v.lang));
-  const pref=[/Google US English/i,/Jenny/i,/Aria/i,/Ana Online/i,/Samantha/i,/Zira/i,/en[-_]US/i,/en[-_]GB/i];
+  const pref=[/Natural/i,/Jenny/i,/Aria/i,/Ava/i,/Samantha/i,/Google US English/i,/Zira/i,/en[-_]US/i,/en[-_]GB/i];
   for(const p of pref){ const v=vs.find(v=>p.test(v.name)||p.test(v.lang)); if(v) return v; }
   return vs[0]||null;
 }
 if(window.speechSynthesis){ VOICE=pickVoice(); speechSynthesis.onvoiceschanged=()=>{ VOICE=pickVoice(); }; }
-function speak(text,{rate=.85,pitch=1.1}={}){
+function ttsSpeak(text,{rate=.85,pitch=1.1}={}){
   return new Promise(res=>{
     if(!window.speechSynthesis) return res();
     try{ speechSynthesis.cancel(); }catch(e){}
@@ -352,6 +352,39 @@ function speak(text,{rate=.85,pitch=1.1}={}){
     setTimeout(()=>{ try{ speechSynthesis.speak(u); }catch(e){ fin(); } }, 30);
   });
 }
+// ---------------- 錄好的發音檔（audio/ 資料夾，比電腦內建語音清楚） ----------------
+const CLIP='audio/';
+const AUD=new Audio(); AUD.preload='auto'; let playTok=0;
+const PRAISE_ALL=PRAISE.concat(['Amazing! Three stars!','Wow! Legendary!']).sort((a,b)=>b.length-a.length);
+const pKey=p=>'P_'+p.toLowerCase().replace(/[^a-z]/g,'');
+function clipKeys(text){
+  let rest=String(text).trim(); const out=[]; let m;
+  while(true){ rest=rest.replace(/^[\s,.!]+/,''); if(!rest) break;
+    const pr=PRAISE_ALL.find(p=>rest.startsWith(p));
+    if(pr){ out.push(pKey(pr)); rest=rest.slice(pr.length); continue; }
+    if((m=rest.match(/^capital ([A-Z])(?![A-Za-z])/))){ out.push('C_'+m[1]); }
+    else if((m=rest.match(/^small ([A-Za-z])(?![A-Za-z])/))){ out.push('S_'+m[1].toUpperCase()); }
+    else if((m=rest.match(/^([A-Z])[,.] ([a-z][a-z -]*[a-z])\./)) && WORDS[m[1]] && WORDS[m[1]][0]===m[2]){ out.push('W_'+m[1]); }
+    else if((m=rest.match(/^(one|two|three|four|five|six|seven|eight|nine|ten)(?![A-Za-z])/))){ out.push('N_'+NUMW.indexOf(m[1])); }
+    else if((m=rest.match(/^([A-Z])(?![A-Za-z])/))){ out.push('L_'+m[1]); }
+    else return null;
+    rest=rest.slice(m[0].length); }
+  return out.length?out:null;
+}
+function playClips(keys,rate){
+  return new Promise(res=>{ const tok=++playTok; let i=0, done=false; const fin=v=>{ if(!done){ done=true; res(v); } };
+    const next=()=>{ if(tok!==playTok) return fin('stop'); if(i>=keys.length) return fin('ok');
+      AUD.src=CLIP+keys[i++]+'.mp3'; AUD.playbackRate=rate<0.8?0.85:1; try{ AUD.preservesPitch=true; }catch(_){}
+      AUD.onended=next; AUD.onerror=()=>fin(i===1?'err':'ok'); const pp=AUD.play(); if(pp&&pp.catch) pp.catch(()=>fin(i===1?'err':'ok')); };
+    next(); setTimeout(()=>fin('ok'),1800*keys.length+1200); });
+}
+async function speak(text,opt={}){
+  try{ speechSynthesis.cancel(); }catch(e){}
+  const keys=clipKeys(text);
+  if(keys){ const r=await playClips(keys,opt.rate||1); if(r!=='err') return; }
+  return ttsSpeak(text,opt);
+}
+function preloadClips(keys){ keys.forEach(k=>{ const a=new Audio(); a.preload='auto'; a.src=CLIP+k+'.mp3'; }); }
 const letterAudio = ch => isUp(ch) ? 'capital '+ch : 'small '+ch.toUpperCase();
 
 // ---------------- 語音辨識 ----------------
@@ -387,7 +420,7 @@ function listen(match, ms=6500){
     try{ r.start(); }catch(e){ err='start'; finish(false); }
   });
 }
-function stopAll(){ try{ speechSynthesis.cancel(); }catch(e){} if(curRec){ try{ curRec.abort(); }catch(e){} curRec=null; } }
+function stopAll(){ playTok++; try{ AUD.pause(); }catch(e){} try{ speechSynthesis.cancel(); }catch(e){} if(curRec){ try{ curRec.abort(); }catch(e){} curRec=null; } }
 function speechMode(kid){ const s=kid.settings; if(s.speech==='off') return 'off'; if(s.speech==='adult' || RT.micDenied || !SR) return 'adult'; return 'auto'; }
 
 // ---------------- 筆畫字形（四線格） ----------------
@@ -693,6 +726,7 @@ function scrHome(fresh){
   }
   const s=kid.settings, L=enabledLetters(s), N=enabledNums(s), sm=speechMode(kid);
   const pet=kid.buddy||kid.avatar;
+  if(!RT.pre){ RT.pre=1; preloadClips(L.flatMap(x=>['L_'+x,'C_'+x,'S_'+x,'W_'+x]).concat(N.map(n=>'N_'+n),PRAISE_ALL.map(pKey))); }
   const canSay = s.say && sm!=='off' && L.length>0;
   const canWrite = s.write && L.length>0 && (s.upper||s.lower);
   const canNum = N.length>0 && (s.write || (s.say && sm!=='off'));
@@ -986,10 +1020,12 @@ function scrWhack(){
   function newTarget(){ let x; do{ x=rand(pool); }while(target && pool.length>1 && x===target.val);
     const show = v==='case' ? (Math.random()<.5?x:x.toLowerCase()) : x;
     target={val:x,show}; const tg=$('#tg');
-    if(v==='listen'){ tg.innerHTML=`找：<button class="btn blue sm" id="rep">🔊 再聽一次</button>`; speak(x,{rate:.8}); }
-    else if(v==='case') tg.innerHTML=`找 <span class="tg">${show}</span> 的${isUp(show)?'小寫':'大寫'}`;
-    else tg.innerHTML=`找 <span class="tg">${x}</span> 的英文`;
-    const rep=$('#rep'); if(rep) rep.onclick=()=>speak(target.val,{rate:.75});
+    const rb='<button class="btn blue sm" id="rep">🔊 再聽一次</button>';
+    if(v==='listen') tg.innerHTML=`找：${rb}`;
+    else if(v==='case') tg.innerHTML=`找 <span class="tg">${show}</span> 的${isUp(show)?'小寫':'大寫'} ${rb}`;
+    else tg.innerHTML=`找 <span class="tg">${x}</span> 的英文 ${rb}`;
+    const sayT=()=>speak(v==='num'?NUMW[target.val]:target.val);
+    $('#rep').onclick=sayT; sayT();
     holes.forEach(h=>{ if(h.up && h.val===x) h.until=Math.max(h.until,performance.now()+1500); });
   }
   function tick(){ if(over) return; const now=performance.now(), el=(now-t0)/1000, left=Math.max(0,DUR-el);
@@ -1009,7 +1045,7 @@ function scrWhack(){
     $('#h2').onclick=()=>scrHome(); $('#a2').onclick=scrWhack; }
   $$('.hole').forEach((el,i)=>el.addEventListener('pointerdown',e=>{ const h=holes[i]; if(over||!h.up||h.el.classList.contains('hit')) return; e.preventDefault();
     if(h.val===target.val){ combo++; const g=10+Math.min(10,(combo-1)*2); score+=g; sfx.bonk(); h.el.classList.add('hit'); h.until=performance.now()+350; floaty('+'+g,e.clientX-20,e.clientY-40); $('#sc').textContent=score; newTarget(); }
-    else { combo=0; score=Math.max(0,score-3); sfx.bad(); h.el.classList.add('miss'); h.until=performance.now()+400; $('#sc').textContent=score; if(v==='listen') speak(target.val,{rate:.75}); } }));
+    else { combo=0; score=Math.max(0,score-3); sfx.bad(); h.el.classList.add('miss'); h.until=performance.now()+400; $('#sc').textContent=score; speak(v==='num'?NUMW[target.val]:target.val); } }));
   $('#start').onclick=()=>{ $('#startrow').innerHTML=''; t0=performance.now(); nextSpawn=t0+600; newTarget(); timer=setInterval(tick,80); };
   $('#quit').onclick=()=>{ over=true; clearInterval(timer); stopAll(); save(); scrHome(); };
   SES={alive:false};
@@ -1201,7 +1237,7 @@ function settingsFromURL(){
 
 // ---------------- 啟動 ----------------
 buildGlyphs();
-document.addEventListener('pointerdown',()=>ac(),{once:true});
+document.addEventListener('pointerdown',()=>{ ac(); try{ AUD.muted=true; AUD.src=CLIP+'P_super.mp3'; const p=AUD.play(); const un=()=>{ AUD.pause(); AUD.muted=false; }; if(p&&p.then) p.then(un,un); else un(); }catch(e){ AUD.muted=false; } },{once:true});
 scrLogin();
 </script>
 </body>
